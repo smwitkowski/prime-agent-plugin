@@ -1,0 +1,14 @@
+{
+  "name": "prime-agent-plugin",
+  "owner": {
+    "name": "Stephen Witkowski"
+  },
+  "plugins": [
+    {
+      "name": "prime-agent",
+      "source": "./",
+      "description": "One-shot and long-lived prime-agent subagents for Claude Code."
+    }
+  ],
+  "description": "Marketplace for the prime-agent Claude Code plugin."
+}

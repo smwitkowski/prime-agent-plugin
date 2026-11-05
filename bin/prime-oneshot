@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# One-shot prime-agent run: prints session id, final answer and token usage, then stops the session.
+# Usage: prime-oneshot <cwd> "<task>"            new session
+#        prime-oneshot <cwd> "<task>" <id>       follow-up in an existing session (--resume)
+# Env:   PA_PROVIDER (default openai-codex), PA_MODEL (default gpt-6.1-terra), PA_THINKING (default high), PA_RAW=1 (no output contract)
+# Exit:  0 ok · 1 failed (error, abnormal stop, or empty reply) — check the FAILED line.
+set -euo pipefail
+source "$(dirname "$0")/../lib/common.sh"
+cwd=$(cd "$1" && pwd) task=$2 resume=${3:-}
+out=$(mktemp "${TMPDIR:-/tmp}/prime-oneshot.XXXXXX").jsonl
+args=(-p --mode json --provider "${PA_PROVIDER:-openai-codex}" --model "${PA_MODEL:-gpt-6.1-terra}" --thinking "${PA_THINKING:-high}" --cwd "$cwd")
+[ -n "$resume" ] && args+=(--resume "$resume")
+
+# A -p run ends the moment the agent waits on anything async (background command, RLM subagent). LEARNINGS 2026-10-04.
+ONESHOT_RULES='
+This is a one-shot run: it ends the moment you wait on anything asynchronous. Run every command in the foreground and do not spawn subagents (rlm.spawn). If the job needs long-running commands or fan-out, do what you can, then say so under Open questions.'
+[ "${PA_RAW:-}" = 1 ] && ONESHOT_RULES=
+prime-agent "${args[@]}" -- "$(with_contract "$task$ONESHOT_RULES")" < /dev/null > "$out" || echo "prime-agent exited $? (raw log: $out)" >&2
+
+id=$(head -1 "$out" | jq -r 'select(.type=="session").id // empty')
+# ponytail: always stop, even on failure; idle -p sessions otherwise pile up in the daemon. --resume <id> still works afterwards.
+[ -n "$id" ] && { prime-agent stop "$id" >/dev/null 2>&1 || true; }
+
+last=$(jq -c 'select(.type=="agent_end") | [.messages[]|select(.role=="assistant")] | last' "$out")
+model=$(jq -r '.model // "?"' <<<"${last:-null}")
+stop=$(jq -r '.stopReason // "none"' <<<"${last:-null}")
+err=$(jq -r '.errorMessage // ""' <<<"${last:-null}")
+text=$(jq -r '[.content[]?|select(.type=="text").text]|join("")' <<<"${last:-null}")
+tokens=$(jq -rs '[.[]|select(.type=="agent_end")|.messages[]|select(.role=="assistant").usage.totalTokens // 0]|add // 0' "$out")
+
+echo "session: ${id:-unknown}   model: $model   tokens: $tokens   log: $out"
+verdict=$(check_reply "$stop" "$err" "$text") && rc=0 || rc=1
+[ -n "$verdict" ] && echo "$verdict"
+echo "---"
+echo "$text"
+exit $rc

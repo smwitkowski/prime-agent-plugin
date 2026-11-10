@@ -1,6 +1,6 @@
 {
   "name": "prime-agent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Use prime-agent (Prime Intellect's RLM harness) as a subagent from Claude Code: one-shot runs and long-lived named workers.",
   "author": {
     "name": "Stephen Witkowski"

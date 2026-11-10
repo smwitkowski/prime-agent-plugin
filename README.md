@@ -44,7 +44,7 @@ Then run `/prime-help` in Claude Code for the reference card. Update later with 
 | Component | What it does |
 |---|---|
 | `skills/prime-oneshot` · `bin/prime-oneshot` | Bounded task → answer, follow-ups via `--resume` |
-| `skills/prime-worker` · `bin/prime-worker` | Daemon-hosted workers: start [--worktree] [--budget] / send [--file] / wait [gate] / status [--brief] / heartbeat / watch / inbox [--now] / learn / stop. Briefs follow skills/prime-worker/BRIEF-TEMPLATE.md. Long runs report through files (heartbeat workflow) |
+| `skills/prime-worker` · `bin/prime-worker` | Daemon-hosted workers: start [--worktree] [--budget] / send [--file] / wait [gate] / status [--brief] / heartbeat / watch [--quiet] / inbox [--now] / learn / stop. Briefs follow skills/prime-worker/BRIEF-TEMPLATE.md. Long runs report through files (heartbeat workflow) |
 | `agents/prime-runner.md` | One-shot in an isolated git worktree, returns a verified summary |
 | `skills/prime-help` | Reference card (`/prime-help`) |
 | `lib/common.sh` | Shared output contract and silent-failure check |

@@ -15,6 +15,7 @@ case $1 in
 esac
 STUB
 chmod +x "$T/bin/prime-agent"
+printf '#!/usr/bin/env bash\n[ "$1 $2" = "pr list" ] && cat "$HOME/gh-merged" 2>/dev/null; exit 0\n' > "$T/bin/gh"; chmod +x "$T/bin/gh"
 fail() { echo "FAIL: $*"; echo "$out"; exit 1; }
 S=$T/status; mkdir -p "$S"; printf 'sid\t%s\t%s\n' "$T" "$S" > "$PRIME_WORKERS_DIR/w"
 reply='done\n## Result\nshipped it\n## Evidence\nlong log\n## Files changed\na.ts\n## Open questions\nnone'
@@ -29,6 +30,11 @@ grep -q 'long log' "$S/last-reply.md" || fail "last-reply.md incomplete"
 printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"stop","content":[]}}' >> "$HOME/.prime/agent/sessions/sid.jsonl"
 out=$("$W" wait w 60) && fail "empty reply exited 0"
 grep -q '^WAIT: FAILED empty reply' <<<"$(tail -1 <<<"$out")" || fail "last line not WAIT: FAILED"
+# 2026-11-09: a question with no reply text comes back as the question, not as an empty reply
+echo '{"needsInput":"which region?"}' > "$S/heartbeat.json"
+out=$("$W" wait w 60) || fail "empty reply with a question exited nonzero"
+[ "$(tail -1 <<<"$out")" = "WAIT: NEEDS INPUT: which region?" ] || fail "question masked by the empty reply"
+rm "$S/heartbeat.json"
 
 echo '{"phase":"build","needsInput":"which db?"}' > "$S/heartbeat.json"
 out=$("$W" status --brief)
@@ -48,6 +54,11 @@ out=$("$W" stop w2); grep -q 'kept worktree.*uncommitted' <<<"$out" || fail "dir
 reg; rm "$R.prime-w2/x"
 out=$("$W" stop w2); grep -q 'removed worktree' <<<"$out" && [ ! -d "$R.prime-w2" ] || fail "merged clean worktree not removed"
 git -C "$R" show-ref -q --verify refs/heads/prime/w2 || fail "branch deleted"
+# 2026-11-09: a squash-merged PR counts as merged once its head is the worktree's HEAD
+git -C "$R" worktree add -q -b prime/w7 "$R.prime-w7"; git -C "$R.prime-w7" commit -q --allow-empty -m squashed
+printf 'sid\t%s\t%s\t1\n' "$R.prime-w7" "$S" > "$PRIME_WORKERS_DIR/w7"; git -C "$R.prime-w7" rev-parse HEAD > "$HOME/gh-merged"
+out=$("$W" stop w7); grep -q 'removed worktree' <<<"$out" && [ ! -d "$R.prime-w7" ] || fail "squash-merged worktree kept"
+rm "$HOME/gh-merged"
 
 out=$("$W" start --worktree w3 "$R" "task" 2>&1)
 [ "$(git -C "$R.prime-w3" branch --show-current)" = prime/w3 ] || fail "start --worktree made no worktree"
@@ -58,7 +69,7 @@ out=$("$W" start w4 "$R" "   " 2>&1) && fail "empty task accepted"; grep -q 'emp
 out=$("$W" send w "" 2>&1) && fail "empty send accepted"
 printf 'from a file\n' > "$T/msg"; "$W" send w --file "$T/msg" >/dev/null 2>&1; grep -q '^from a file' "$HOME/sent" || fail "send --file"
 out=$("$W" start --budget=120 w5 "$T" "task" 2>&1); grep -q 'Budget: about \$120' "$HOME/sent" || fail "budget not in brief"
-grep -q 'Never message another worker' "$HOME/sent" || fail "protocol lacks the no-sibling-messages rule"
+grep -q 'Never message another top-level worker' "$HOME/sent" && grep -q 'Your own subagents' "$HOME/sent" || fail "protocol lacks the no-sibling-messages rule"
 out=$("$W" wait w 60 "make test >/dev/null") && fail "/dev/null gate accepted"; grep -q '^WAIT: FAILED gate sends output to /dev/null' <<<"$out" || fail "/dev/null gate message"
 out=$("$W" wait w 60 "npm test | tail -3") && fail "piped gate accepted"
 # early turn end: a reply without ## Result is nudged, not returned as done
@@ -68,6 +79,14 @@ out=$(PA_NUDGES=1 "$W" wait w 60 true)
 grep -q '^NUDGE (1/1)' <<<"$out" && grep -q 'without the ## Result section' "$HOME/sent" || fail "no nudge on a reply without ## Result"
 grep -q '^GATE PASSED at .*: true' <<<"$out" && [ "$(jq -r .state "$S/gate.json")" = passed ] || fail "gate pass not recorded"
 [ ! -e "$PRIME_WORKERS_DIR/gate.lock" ] || fail "host-wide gate lock still taken"
+# 2026-11-09: a ## Result that says work is still running is nudged too; a BLOCKED one is not
+printf '%s\n' '{"type":"message","message":{"role":"assistant","model":"m","stopReason":"stop","content":[{"type":"text","text":"## Result\nCommitted. The backend gate is still running; the branch has not yet been pushed.\n## Open questions\nnone"}],"usage":{"cost":{"total":1}}}}' >> "$HOME/.prime/agent/sessions/sid.jsonl"
+out=$(PA_NUDGES=1 "$W" wait w 60)
+grep -q '^NUDGE (1/1): its ## Result says work is still running' <<<"$out" && grep -q 'Block on it now' "$HOME/sent" || fail "still-running Result not nudged"
+grep -q '^WARN: its ## Result says work is still running' <<<"$out" || fail "no WARN once nudges ran out"
+printf '%s\n' '{"type":"message","message":{"role":"assistant","model":"m","stopReason":"stop","content":[{"type":"text","text":"## Result\n**BLOCKED** pending a decision; the build is still running.\n## Open questions\nwhich?"}],"usage":{"cost":{"total":1}}}}' >> "$HOME/.prime/agent/sessions/sid.jsonl"
+out=$(PA_NUDGES=1 "$W" wait w 60); grep -q NUDGE <<<"$out" && fail "BLOCKED result nudged"
+printf '%s\n' "{\"type\":\"message\",\"message\":{\"role\":\"assistant\",\"model\":\"m\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}],\"usage\":{\"cost\":{\"total\":1}}}}" >> "$HOME/.prime/agent/sessions/sid.jsonl"
 # 2026-10-29: a new question comes back at once, with no nudge and no gate
 rm -f "$S/answered"; echo '{"needsInput":"which cache?"}' > "$S/heartbeat.json"; : > "$HOME/sent"
 out=$(PA_NUDGES=1 "$W" wait w 60 "touch $T/gate-ran; false") || fail "needs-input wait exited nonzero"
@@ -78,9 +97,11 @@ grep -q NUDGE <<<"$out" && fail "nudged a worker that needs input"
 out=$(PA_NUDGES=0 "$W" wait w 60 true); grep -q '^GATE PASSED' <<<"$out" && [ "$(tail -1 <<<"$out")" = "WAIT: OK" ] || fail "answered question still short-circuited"
 # idle while its own listed background job runs is not done
 sleep 7 & job=$!
-echo "{\"activeJobs\":[{\"pid\":$job,\"cmd\":\"trial\",\"expectedEnd\":\"$(jq -nr 'now + 600 | todate')\"}]}" > "$S/heartbeat.json"
+# 2026-11-09: expectedEnd is optional, and the worker is told to continue when the job exits
+echo "{\"activeJobs\":[{\"pid\":$job,\"cmd\":\"trial\"}]}" > "$S/heartbeat.json"
 t0=$(date +%s); out=$(PA_NUDGES=0 "$W" wait w 60)
 grep -q 'background job is still running' <<<"$out" && [ $(( $(date +%s) - t0 )) -ge 5 ] || fail "wait returned while the worker's job ran"
+grep -q "^RESUMED: its listed job exited (pid $job: trial)" <<<"$out" && grep -q "pid $job: trial) has exited" "$HOME/sent" || fail "worker not resumed when its job exited"
 rm "$S/heartbeat.json"
 # a slow gate: report the reply, leave the gate running, collect it on the next wait
 rc=0; out=$(PA_NUDGES=0 PA_GATE_REPORT_AFTER=2 "$W" wait w 60 "sleep 8") || rc=$?
@@ -94,6 +115,11 @@ echo busy > "$HOME/activity"; out=$("$W" watch w 1 30); grep -q '^WATCH: gate fi
 rm "$HOME/activity"
 # watch wakes on spend while busy
 echo busy > "$HOME/activity"; out=$(PA_SPEND_ALERT=0 "$W" watch w 1 30); grep -q '^WATCH: spend' <<<"$out" || fail "watch spend alarm"
+# 2026-11-09: watch --quiet sleeps through phase changes, but a new question still wakes it
+echo '{"phase":"a"}' > "$S/heartbeat.json"; ( sleep 2; echo '{"phase":"b"}' > "$S/heartbeat.json"; sleep 3; echo '{"phase":"b","needsInput":"ok?"}' > "$S/heartbeat.json" ) &
+t0=$(date +%s); out=$("$W" watch --quiet w 1 30); wait
+grep -q '^WATCH: needs input' <<<"$out" && [ $(( $(date +%s) - t0 )) -ge 5 ] || fail "watch --quiet woke on a phase change or missed the question"
+rm "$S/heartbeat.json"
 # 2026-10-29 guards: a worker blocked on a live listed job isn't STALE until 15m past expectedEnd
 sleep 60 & job=$!
 echo "{\"phase\":\"smoke\",\"activeJobs\":[{\"pid\":$job,\"cmd\":\"smoke\",\"expectedEnd\":\"$(jq -nr 'now + 3600 | todate')\"}]}" > "$S/heartbeat.json"
@@ -115,7 +141,10 @@ out=$("$W" status --brief | grep '^w '); grep -q 'WAITING ON YOU' <<<"$out" && !
 D=$T/drepo; git init -q "$D"; echo a > "$D/f"; git -C "$D" add f; git -C "$D" commit -q -m init
 SD=$T/sd; mkdir -p "$SD"; printf 'sid\t%s\t%s\n' "$D" "$SD" > "$PRIME_WORKERS_DIR/d"; echo b > "$D/f"
 out=$(PA_NUDGES=0 PA_GATE_RETRIES=2 "$W" wait d 60 "touch $T/dgate") && fail "dirty tree gated"
-grep -q '^GATE SKIPPED (1/2): uncommitted' <<<"$out" && [ ! -e "$T/dgate" ] && grep -q 'uncommitted changes to tracked files' "$HOME/sent" || fail "dirty tree not skipped"
+grep -q '^GATE SKIPPED (1/2): uncommitted' <<<"$out" && [ ! -e "$T/dgate" ] && grep -q '^ M f$' "$HOME/sent" || fail "dirty tree not skipped"
+# 2026-11-09: untracked files skip the gate too; ignored ones don't
 git -C "$D" commit -q -am work; touch "$D/untracked"
-out=$(PA_NUDGES=0 "$W" wait d 60 "touch $T/dgate"); grep -q '^GATE PASSED' <<<"$out" && [ -e "$T/dgate" ] || fail "committed tree (untracked file only) not gated"
+out=$(PA_NUDGES=0 PA_GATE_RETRIES=2 "$W" wait d 60 "touch $T/dgate") && fail "untracked file gated"; grep -q '^?? untracked$' "$HOME/sent" || fail "untracked file not listed"
+echo untracked > "$D/.git/info/exclude"
+out=$(PA_NUDGES=0 "$W" wait d 60 "touch $T/dgate"); grep -q '^GATE PASSED' <<<"$out" && [ -e "$T/dgate" ] || fail "clean tree (ignored file only) not gated"
 echo "worker-cli self-check: PASS"

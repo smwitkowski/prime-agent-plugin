@@ -165,3 +165,15 @@ Proposal: on an empty reply, have bin/prime-oneshot re-scan the log for the last
 ## 2026-10-29: stale gate display; gating an uncommitted tree (0.6.8)
 - Saw: a worker's status read "GATE running 194m" for a gate whose process had died before writing a status; the note above records gates run on HEAD while the worker's edits were uncommitted.
 - Changed: `status`/`heartbeat` show a running gate whose process is gone as "GATE stopped" (the worker reads as WAITING ON YOU again). `wait` with a gate checks `git status --porcelain --untracked-files=no` first: tracked changes skip the gate and tell the worker to commit, counting as a retry.
+
+## 2026-11-09: workers still ended turns on their own jobs; review of 83 episodes (0.8.0)
+- Saw: across 83 worker episodes in four projects (30 Oct–9 Nov), Terra workers still ended their turn while their own job ran. `wait` ignored `activeJobs` entries without `expectedEnd` and accepted "## Result: … still running" as a finished reply (about 60 such replies in one project, 222 in another), so supervisors resumed workers by hand (43 messages in one project, 9 `kill -0` loops in another). One gate "passed" at the base commit because all the new work was untracked. Two questions came back as `WAIT: FAILED empty reply`. `stop` kept four squash-merged worktrees as "neither pushed nor merged". One overnight `watch` woke its supervisor 72 times on phase changes at ~830k context. The no-sibling rule stopped parents from answering their own subagents in three episodes.
+- Changed (0.8.0):
+  - `wait`: any live pid in `activeJobs` counts as busy (`expectedEnd` is only used for STALE). When the job exits while the worker is idle, `wait` tells it to continue.
+  - `wait`: a `## Result` that says work is still running gets the nudge too (phrases checked against 786 real Result sections; a BLOCKED result is left alone), and a WARN line once nudges run out.
+  - `wait`: untracked files skip the gate like uncommitted ones; the message lists them and offers `.gitignore`.
+  - `wait`: a new needsInput question with an empty reply returns `WAIT: NEEDS INPUT`, not `FAILED empty reply`.
+  - `watch --quiet`: no wake on phase or lastError changes, for batch and overnight runs.
+  - `stop`: a merged PR whose head is the worktree's HEAD counts as merged (needs `gh`).
+  - Protocol: the no-messaging rule covers other top-level workers only; a worker's own subagents are part of its work. Don't end a turn while a needed job runs; if you must, list it in `activeJobs` first.
+- Outside the plugin: supervisor (Claude) spend was 96% of the total, mostly coordinators re-reading 300–900k contexts on every wake. Capping auto-compaction (`"autoCompactWindow": 250000` in `~/.claude/settings.json`) is the supervisor-side fix.

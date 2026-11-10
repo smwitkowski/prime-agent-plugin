@@ -45,11 +45,11 @@ prime-oneshot <cwd> "<follow-up>" <session-id>  # continue it (same cwd)
 # worker
 prime-worker start  <name> <cwd> "<task>"   # create + first task, returns immediately
 prime-worker send   <name> "<msg>"          # idle: next task · busy: steer current task
-prime-worker wait   <name> [timeout_s] [gate_cmd]  # block until idle; questions return at once; gate loops until it passes (QUEUED after 5 min)
+prime-worker wait   <name> [timeout_s] [gate_cmd]  # block until idle and its listed jobs end (resumes it when they do); questions return at once; gate loops until it passes (QUEUED after 5 min)
 prime-worker status [name]                  # busy / idle / stopped + last reply
 prime-worker heartbeat <name> [n]           # read its status files: heartbeat.json + last n activity lines
 prime-worker inbox  <name> "<msg>"          # leave guidance it reads between steps (no steering)
-prime-worker watch  <name>                  # background: returns when it needs you (idle/failed/input/phase/stale)
+prime-worker watch  [--quiet] <name>        # background: returns when it needs you (idle/failed/input/phase/stale); --quiet skips phase
 prime-worker learn  <name> "<lesson>" [global]  # worker persists a lesson (prime-agent refine)
 prime-worker stop   <name>                  # stop and forget
 ```

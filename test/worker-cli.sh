@@ -113,6 +113,9 @@ grep -q '^GATE: collecting' <<<"$out" && grep -q '^GATE PASSED' <<<"$out" && [ "
 PA_NUDGES=0 PA_GATE_REPORT_AFTER=1 "$W" wait w 60 "sleep 12" >/dev/null || true
 echo busy > "$HOME/activity"; out=$("$W" watch w 1 30); grep -q '^WATCH: gate finished (exit 0)' <<<"$out" || fail "watch missed the finished gate"
 rm "$HOME/activity"
+# 2026-11-24: watch --gate runs the gate once the worker is idle, and reports a failing one
+out=$(PA_NUDGES=0 "$W" watch --gate true w 1 30); grep -q '^WATCH: idle; running the gate' <<<"$out" && grep -q '^GATE PASSED' <<<"$out" && [ "$(tail -1 <<<"$out")" = "WAIT: OK" ] || fail "watch --gate did not run the gate"
+out=$(PA_NUDGES=0 PA_GATE_RETRIES=1 "$W" watch --gate false w 1 30) && fail "watch --gate exited 0 on a failing gate"
 # watch wakes on spend while busy
 echo busy > "$HOME/activity"; out=$(PA_SPEND_ALERT=0 "$W" watch w 1 30); grep -q '^WATCH: spend' <<<"$out" || fail "watch spend alarm"
 # 2026-11-09: watch --quiet sleeps through phase changes, but a new question still wakes it

@@ -26,7 +26,7 @@
 #                                               running, gets a "continue" nudge first (PA_NUDGES, default 2).
 #   prime-worker status [--brief] [name]        activity + last reply for one or all workers; --brief: one line each + totals,
 #                                               idle workers flagged WAITING ON YOU <minutes>
-#   prime-worker watch  [--quiet] <name> [interval_s] [timeout_s]
+#   prime-worker watch  [--quiet] [--gate <cmd>] <name> [interval_s] [timeout_s]
 #                                               block (run in background) until the worker needs you: idle, failed,
 #                                               stopped, needs input, phase change, stale, or spend/compactions since the
 #                                               watch started reach PA_SPEND_ALERT (default 150 USD) / PA_COMPACT_ALERT (10).
@@ -59,6 +59,7 @@ Reporting protocol. You may run for hours; your supervisor checks files instead 
 - heartbeat.json: overwrite at every phase change and at least every 10 minutes while you are actively working, as one JSON object with keys ts (UTC ISO-8601), phase, currentStep, activeJobs (list; a background job you wait on is {pid, cmd, expectedEnd}, expectedEnd in UTC ISO-8601 if you can estimate it), needsInput (null, or the exact question you are blocked on), lastError (null or short text), nextStep, and tracks: one entry per parallel workstream, {name, owner, status, next} (owner = the subagent running it). Extra keys are fine. While you wait on a listed job, leave the file alone until it finishes. Never schedule a recurring prompt more often than every 30 minutes, and cancel it when the job ends.
 - ACTIVITY.jsonl: append one line per meaningful step: {\"ts\", \"agent\", \"event\", \"detail\"}, event one of started, finished, decision, verified, failed, note. Give every subagent this path and these exact keys.
 - INBOX.md: your supervisor's guidance, newest entry first. Read it between steps; it overrides older messages. Don't edit it.
+- While you work, run only the tests for the files you changed, in the foreground. Don't run the project's full gate or test suite unless the brief says to: your supervisor runs it once on your committed HEAD when you reply.
 - Run long commands once in the background, then make ONE blocking wait on them (wait <pid> or a single long timeout); never check back on a short timer. Don't end your turn while a job you need is running: nothing wakes you when it ends. If you must, list it in activeJobs first; your supervisor's wait then tells you when it exits. Steering arrives via INBOX.md between steps.
 - Context lives in files, not in your conversation. Keep a CONTEXT.md in the status folder (goal, decisions and why, current state, open threads, where things are) and update it as you go. After every compaction or fresh start, re-read CONTEXT.md, heartbeat.json, INBOX.md and LESSONS.md before continuing, so summaries can't make you drift.
 - Refine yourself freely: your continual harness is yours to improve. Use refine.run() for how-to-work lessons (corrections, failure modes, tactics, preferences), and also append each one as a dated line to LESSONS.md so it survives a fresh session. Progress and state go in the files above, not in refine.
@@ -315,8 +316,9 @@ heartbeat)
   exit 0 ;;
 watch)
   # one background wait that wakes the supervisor only when something needs it (285 timed checks and 178 wakeups for one worker, 2026-10-03)
-  quiet=; [ "${1:-}" = --quiet ] && { quiet=1; shift; }
-  [ $# -ge 1 ] || die "usage: watch [--quiet] <name> [interval_s] [timeout_s]"
+  # --gate: supervisors used watch 280 times and a gated wait 6 times in one project, so the gate rides on watch too (review 2026-11-24)
+  quiet= wgate=; while :; do case ${1:-} in --quiet) quiet=1; shift;; --gate) wgate=${2:?--gate needs a command}; shift 2;; *) break;; esac; done
+  [ $# -ge 1 ] || die "usage: watch [--quiet] [--gate <cmd>] <name> [interval_s] [timeout_s]"
   load "$1"; iv=${2:-120}; end=$(( $(date +%s) + ${3:-21600} )); hb=$sdir/heartbeat.json
   # --quiet: a batch worker changed phase per queue item and woke its supervisor 72 times overnight at ~830k context (LEARNINGS 2026-11-09)
   S='"\(.phase // "")|\(.needsInput // "")|\(.lastError // "")"' change="phase change"; [ -z "$quiet" ] || S='.needsInput // ""' change="needs input changed"
@@ -337,6 +339,8 @@ watch)
     [ -z "$r" ] && [ $(( ${s1:=$(spend)} - ${s0:-0} )) -ge "${PA_SPEND_ALERT:-150}" ] && r="spend: +\$$(( s1 - ${s0:-0} )) since this watch started"
     [ -z "$r" ] && [ $(( $(compactions) - ${c0:-0} )) -ge "${PA_COMPACT_ALERT:-10}" ] && r="context: $(( $(compactions) - ${c0:-0} )) compactions since this watch started"
     unset s1
+    # idle with a gate: hand over to wait, which nudges, checks for uncommitted files, runs the gate and sends failures back
+    [ "$r" = idle ] && [ -n "$wgate" ] && { echo "WATCH: idle; running the gate"; exec "$0" wait "$1" $(( end - $(date +%s) > 60 ? end - $(date +%s) : 60 )) "$wgate"; }
     [ -n "$r" ] && { echo "WATCH: $r"; exec "$0" heartbeat "$1"; }
   done
   echo "WATCH: timeout, no change"; exec "$0" heartbeat "$1" ;;

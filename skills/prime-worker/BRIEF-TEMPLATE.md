@@ -12,7 +12,7 @@ Scope: <numbered changes>. You own: <paths>. Don't touch: <paths other workers o
 Constraints: <no new deps, no push/merge/deploy, no keys or .env, project non-negotiables>
 SUPERVISOR STEP: <keyed, live, paid or deploy step only the supervisor runs; you never attempt it — reply when ready for it>
 Shared resources: <database / port / test slot and the lock command to take first; none>
-Gate: <exact command, run in a clean env>; the supervisor passes it to `prime-worker wait`
+Gate: <exact command, run in a clean env>; the supervisor runs it (`prime-worker wait` or `watch --gate`); you run only the tests for the files you change, in the foreground
 Done means: <gate passes> + <named smoke or check> + <one PR, not merged / artifact at path>; evidence in the PR body or <path outside the repo>
 Stop rule: budget $<n> (start --budget) and <h> hours; at either, or if a rule blocks you: update CONTEXT.md, set needsInput, reply BLOCKED under ## Result
 ```

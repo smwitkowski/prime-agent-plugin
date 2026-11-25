@@ -40,8 +40,17 @@
 #   prime-worker stop   <name>                  stop the worker and forget it; a --worktree worktree is removed when it
 #                                               is clean and its branch is pushed or merged, or its HEAD is a merged PR's
 #                                               head (squash merges; needs gh). PA_KEEP_WORKTREE=1 keeps it
-# Env: PA_PROVIDER (default openai-codex), PA_MODEL (default gpt-6.1-terra), PA_THINKING (default high), PA_RAW=1 (no output contract or reporting protocol),
-# PA_STATUS_DIR (start: status folder, default ~/.local/state/prime-workers/<name>.d), PA_STALE_MIN (heartbeat, default 15).
+#   prime-worker stats  [name...]               one row per finished task (and any task in flight): model, tokens in/out/cached,
+#                                               API-equivalent cost, wall time, time to first output, turns, compactions, gate
+#                                               result, fix rounds. wait appends each finished task to PA_STATS_FILE.
+#   prime-worker h2h    <repo> "<brief>"|<brief-file> "<gate_cmd>"
+#                                               head to head: the same brief and gate on two models (PA_H2H="provider/model
+#                                               provider/model", default: the default model vs openai-codex/gpt-6.1-terra), each
+#                                               in its own worktree from the repo's HEAD. Prints stats, gate result and diff size
+#                                               per model. Picks no winner, merges nothing, leaves both workers for you to stop.
+# Env: PA_PROVIDER / PA_MODEL / PA_THINKING (defaults in lib/common.sh), PA_RAW=1 (no output contract or reporting protocol),
+# PA_STATUS_DIR (start: status folder, default ~/.local/state/prime-workers/<name>.d), PA_STALE_MIN (heartbeat, default 15),
+# PA_STATS_FILE (default ~/.local/state/prime-worker-stats.jsonl), PA_H2H_TIMEOUT (h2h: seconds per worker, default 3600).
 # The model must be in `prime-agent model list`, or the daemon falls back to the settings.json default when it wakes the worker.
 set -euo pipefail
 source "$(dirname "$0")/../lib/common.sh"
@@ -119,6 +128,27 @@ STILL="Your ## Result says work is still running, so the task isn't finished, an
 still_running() { local r; r=$(awk '/^## /{p=/^## Result/; next} p' <<<"$1" | grep -v '^[[:space:]]*$' || true)
   [ -n "$r" ] && ! head -n 1 <<<"$r" | grep -qiE '^[^[:alnum:]]*blocked' \
     && grep -qiE '(is|are|still|now) (still )?running|running in the background|checks? running|in progress|underway|not (yet )?(finished|complete|done|committed|pushed|gated)|(has|have) not (yet )?(finished|been committed|been pushed)|(remains?|is|are) (still )?pending|pending the|(is|are) downloading' <<<"$r"; }
+# Per-task measurement from what Prime already records in the session file. A task runs from start (or a send to an idle
+# worker) until wait reports it; <status>/task holds "<start epoch> <session-file lines before it>".
+STATS=${PA_STATS_FILE:-$HOME/.local/state/prime-worker-stats.jsonl}
+task_mark() { mkdir -p "$sdir"; echo "${2:-$(date +%s)} $1" > "$sdir/task"; }
+# task_stats <name> <result> <gate> <fix rounds>: one JSON line. Cost is API-equivalent (models.json prices), subagents and
+# compaction calls included. ponytail: prime-agent records no quota or rate-limit share, so a subscription run shows tokens only.
+task_stats() { local t0 off; read -r t0 off < "$sdir/task"
+  jq -sc --arg w "$1" --arg r "$2" --arg g "$3" --argjson fix "$4" --argjson t0 "$t0" --argjson off "$off" --argjson now "$(date +%s)" '
+    ([.[]|select(.type=="thinking_level_change").thinkingLevel]|last) as $th | .[$off:] as $t
+    | [$t[]|select(.type=="message" and .message.role=="assistant")] as $a
+    | [$a[].message.usage, ($t[]|select(.type=="child_usage_attributed").childUsage), ($t[]|select(.type=="compaction").usage) | select(. != null)] as $u
+    | {ts: ($now|todate), worker: $w, model: ($a|last|.message|"\(.provider // "?")/\(.model // "?")"), thinking: $th,
+       in: ($u|map(.input // 0)|add // 0), out: ($u|map(.output // 0)|add // 0), cached: ($u|map(.cacheRead // 0)|add // 0),
+       cost: ($u|map(.cost.total // 0)|add // 0), wall_s: ($now - $t0),
+       ttfo_s: (try (($a[0].timestamp|sub("\\.[0-9]+";"")|fromdateiso8601) - $t0) catch null),
+       turns: ($a|length), compactions: ([$t[]|select(.type=="compaction")]|length), result: $r, gate: $g, fix_rounds: $fix}' \
+    "$HOME/.prime/agent/sessions/$id.jsonl" 2>/dev/null || true; }
+task_log() { [ -f "$sdir/task" ] || return 0; mkdir -p "$(dirname "$STATS")"; task_stats "$@" >> "$STATS"; rm -f "$sdir/task"; tail -n 1 "$STATS" | stats_table; }
+stats_table() { jq -rs '["worker","model","think","in","out","cached","cost","wall_s","ttfo_s","turns","compact","result","gate","fix"],
+    (.[]|[.worker,.model,.thinking,.in,.out,.cached,"$\(.cost*100|round/100)",.wall_s,.ttfo_s,.turns,.compactions,.result,.gate,.fix_rounds])
+    | map(. // "-"|tostring) | @tsv' | column -t -s $'\t'; }
 
 cmd=${1:-}; shift || true
 case "$cmd" in
@@ -144,14 +174,14 @@ start)
   fi
   # A -p run creates the session with the model pinned; the task itself goes through the daemon,
   # because -p exits as soon as the agent waits on background work.
-  th=${PA_THINKING:-high}; [ "$th" = max ] && [ "${PA_PROVIDER:-openai-codex}" = openai-codex ] && { th=xhigh; echo "note: max clamps to high on openai-codex; using xhigh" >&2; }
-  log=$(mktemp "${TMPDIR:-/tmp}/prime-$name.XXXXXX").jsonl
-  prime-agent -p --mode json --provider "${PA_PROVIDER:-openai-codex}" --model "${PA_MODEL:-gpt-6.1-terra}" --thinking "$th" \
+  th=$PA_THINKING; [ "$th" = max ] && [ "$PA_PROVIDER" = openai-codex ] && { th=xhigh; echo "note: max clamps to high on openai-codex; using xhigh" >&2; }
+  log=$(mktemp "${TMPDIR:-/tmp}/prime-$name.XXXXXX").jsonl t0=$(date +%s)
+  prime-agent -p --mode json --provider "$PA_PROVIDER" --model "$PA_MODEL" --thinking "$th" \
     --cwd "$cwd" -- "You are a long-lived worker named $name. Tasks arrive as messages. Reply READY." < /dev/null > "$log" \
     || die "prime-agent failed (log: $log)"
   id=$(head -1 "$log" | jq -r '.id // empty'); [ -n "$id" ] || die "no session id (log: $log)"
   sdir=${PA_STATUS_DIR:-$REG/$name.d}; mkdir -p "$sdir"; sdir=$(cd "$sdir" && pwd)
-  printf '%s\t%s\t%s\t%s\n' "$id" "$cwd" "$sdir" "$wt" > "$REG/$name"
+  printf '%s\t%s\t%s\t%s\n' "$id" "$cwd" "$sdir" "$wt" > "$REG/$name"; task_mark 0 "$t0"   # the first task's stats include creating the session
   echo "worker: $name  session: $id  cwd: $cwd  status: $sdir"
   # the daemon's REPL can keep a stale process cwd; outputs landed in an old probe folder (LEARNINGS 2026-10-04)
   guard="Working directory: $cwd. Before anything else run \`import os; os.chdir('$cwd')\` in the REPL (it has no IPython magics, so %cd fails) and assert os.getcwd() == '$cwd'. Use absolute paths, and write deliverables under this folder or an evidence folder the task names (status files go in the status folder below). Do not edit files outside it unless the task names them.
@@ -182,11 +212,14 @@ send)
   # this message answers any pending question, so wait won't return it again
   q=$(need); [ -z "$q" ] || { mkdir -p "$sdir"; printf '%s' "$q" > "$sdir/answered"; }
   # idle: a new task gets the output contract. busy: a steer stays as written.
-  if [ "$a" = idle ]; then send "$(with_contract "$2")"; else send "$2"; fi
+  if [ "$a" = idle ]; then
+    # a new task: close the last one if no wait reported it, then mark where this one starts
+    task_log "$1" unwaited none 0 >/dev/null; task_mark "$(wc -l < "$HOME/.prime/agent/sessions/$id.jsonl" 2>/dev/null || echo 0)"
+    send "$(with_contract "$2")"; else send "$2"; fi
   waiter "$1" || echo "note: no wait or watch is running for $1; start one in the background now so its reply reaches you" >&2 ;;
 wait)
   [ $# -ge 1 ] || die "usage: wait <name> [timeout_s] [gate_cmd]"
-  load "$1"; end=$(( $(date +%s) + ${2:-3600} )) gate=${3:-} tries=0 nudges=0 asked= queued= jobsaid= seen=
+  load "$1"; end=$(( $(date +%s) + ${2:-3600} )) gate=${3:-} tries=0 nudges=0 asked= queued= jobsaid= seen= gs=none
   # the verdict is always the last stdout line, so `| tail -N` can't hide it (405 piped calls, LEARNINGS 2026-10-27)
   wfail() { echo "WAIT: FAILED $*"; exit 1; }
   # a silenced or filtered gate returns empty or wrong failures to the worker (LEARNINGS 2026-10-28)
@@ -247,7 +280,7 @@ Commit them, revert or delete them, or add generated outputs to .gitignore, then
     jq --arg s $gs --arg rc "$grc" --arg t "$(date -u +%FT%TZ)" '.state=$s | .rc=($rc|tonumber? // $rc) | .ended=$t' "$sdir/gate.json" > "$sdir/gate.json.tmp" && mv "$sdir/gate.json.tmp" "$sdir/gate.json"
     if [ $gs = passed ]; then echo "GATE PASSED at ${head:0:8}: $gate"; break; fi
     tries=$((tries+1)); echo "GATE FAILED ($tries/${PA_GATE_RETRIES:-3}): $gate"
-    [ $tries -lt "${PA_GATE_RETRIES:-3}" ] || { echo "$gout" | tail -40; wfail "gate still failing after $tries attempts"; }
+    [ $tries -lt "${PA_GATE_RETRIES:-3}" ] || { echo "$gout" | tail -40; task_log "$1" failed failed $tries; wfail "gate still failing after $tries attempts"; }
     send "$(with_contract "The completion check \`$gate\` failed. Fix the cause, then reply again. Last 40 lines of its output:
 $(echo "$gout" | tail -40)")" >/dev/null
   done
@@ -265,10 +298,11 @@ $(echo "$gout" | tail -40)")" >/dev/null
   # only the sections the supervisor acts on; Evidence and Files changed stay in the file
   if grep -q '^## Result' <<<"$text"; then awk '/^## /{p=/^## (Result|Open questions)/} p' <<<"$text"; else echo "$text"; fi
   echo "---"; echo "full reply: $sdir/last-reply.md"
-  [ $rc = 0 ] || wfail "${verdict#FAILED: }"
+  [ $rc = 0 ] || { task_log "$1" failed $gs $tries; wfail "${verdict#FAILED: }"; }
   [ -z "$asked" ] || { echo "WAIT: NEEDS INPUT: $asked"; exit 0; }
   # exit 3, not 0: the reply is unverified, so `wait && merge` must not proceed
   [ -z "$queued" ] || { echo "WAIT: QUEUED gate still running at ${head:0:8}; run this wait again to collect it (gate: $sdir/gate.log)"; exit 3; }
+  task_log "$1" ok $gs $tries
   echo "WAIT: OK" ;;
 status)
   brief=; [ "${1:-}" = --brief ] && { brief=1; shift; }
@@ -361,7 +395,7 @@ learn)
   send "Record this lesson in your harness: in the Python REPL run \`await refine.run(\"$lesson\", global_=$g)\`, then reply with the refine result only." ;;
 stop)
   [ $# -eq 1 ] || die "usage: stop <name>"
-  load "$1"; prime-agent stop "$id" >/dev/null 2>&1 || true; rm "$REG/$1"; echo "stopped $1 (transcript kept: ~/.prime/agent/sessions/$id.jsonl)"
+  load "$1"; task_log "$1" stopped none 0 >/dev/null; prime-agent stop "$id" >/dev/null 2>&1 || true; rm "$REG/$1"; echo "stopped $1 (transcript kept: ~/.prime/agent/sessions/$id.jsonl)"
   # only worktrees `start --worktree` made; stop first, so nothing writes into a tree being removed
   [ "${wt:-}" = 1 ] && [ -d "$cwd" ] || exit 0
   [ "${PA_KEEP_WORKTREE:-}" = 1 ] && { echo "kept worktree $cwd (PA_KEEP_WORKTREE=1)"; exit 0; }
@@ -374,5 +408,24 @@ stop)
     || { echo "kept worktree $cwd: branch $b is neither pushed nor merged"; exit 0; }
   main=$(dirname "$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)")
   git -C "$main" worktree remove "$cwd" && echo "removed worktree $cwd (branch $b kept)" ;;
+stats)
+  { [ ! -f "$STATS" ] || jq -c 'select(($ARGS.positional|length) == 0 or (.worker|IN($ARGS.positional[])))' "$STATS" --args "$@"
+    for n in ${*:-$(ls -p "$REG" | grep -v /)}; do [ -f "$REG/$n" ] || continue; load "$n"; if [ -f "$sdir/task" ]; then task_stats "$n" running - 0; fi; done
+  } | stats_table ;;
+h2h)
+  [ $# -eq 3 ] || die 'usage: h2h <repo> "<brief>"|<brief-file> "<gate_cmd>"'
+  repo=$(git -C "$1" rev-parse --show-toplevel) || die "h2h: $1 is not in a git repo"
+  base=$(git -C "$repo" rev-parse HEAD) brief=$2 gate=$3 tag=h2h-$(date +%m%d%H%M%S) names=; [ ! -f "$2" ] || brief=$(cat "$2")
+  set -- ${PA_H2H:-$PA_PROVIDER/$PA_MODEL openai-codex/gpt-6.1-terra}
+  [ $# -eq 2 ] && [ "$1" != "$2" ] || die "h2h needs two different models: PA_H2H=\"provider/model provider/model\" (got: $*)"
+  for pm; do n=$tag-$(tr -c 'A-Za-z0-9._\n-' - <<<"${pm#*/}"); names="$names $n"
+    PA_PROVIDER=${pm%%/*} PA_MODEL=${pm#*/} "$0" start --worktree="$base" "$n" "$repo" "$brief" || die "h2h: could not start $pm"; done
+  # each wait blocks through its gate (no QUEUED), so both rows are final when this returns
+  for n in $names; do PA_GATE_REPORT_AFTER=0 "$0" wait "$n" "${PA_H2H_TIMEOUT:-3600}" "$gate" > "$REG/$n.d/wait.out" 2>&1 & done; wait
+  echo "base ${base:0:8}  gate: $gate"
+  for n in $names; do load "$n"; d=$(git -C "$cwd" diff --shortstat "$base" HEAD)
+    printf '%s\n  %s\n  diff:%s\n  worktree: %s  (wait output: %s)\n' "$n" "$(tail -n 1 "$sdir/wait.out")" "${d:- no committed changes}" "$cwd" "$sdir/wait.out"; done
+  "$0" stats $names
+  echo "not judged, not merged. When done: $(for n in $names; do printf 'prime-worker stop %s; ' "$n"; done)" ;;
 *) awk 'NR>1 && !/^#/{exit} NR>1' "$0"; exit 1 ;;
 esac

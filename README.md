@@ -58,7 +58,7 @@ All settings are environment variables; defaults are current choices, not requir
 
 | Variable | Default | Effect |
 |---|---|---|
-| `PA_PROVIDER` | `openai-codex` | prime-agent provider |
+| `PA_PROVIDER` | `openai-codex` | prime-agent provider (the three defaults live in `lib/common.sh`) |
 | `PA_MODEL` | `gpt-6.1-terra` | Model, pinned when a worker is created |
 | `PA_THINKING` | `high` | Thinking level (`max` becomes `xhigh` on openai-codex) |
 | `PA_RAW` | unset | `1` skips the output contract and reporting protocol |
@@ -71,6 +71,9 @@ All settings are environment variables; defaults are current choices, not requir
 | `PA_COMPACT_ALERT` | `10` | Compactions since `watch` started that wake you |
 | `PA_STALE_MIN` | `15` | Minutes without a heartbeat before a busy worker reads STALE |
 | `PA_KEEP_WORKTREE` | unset | `1` keeps a `--worktree` worktree on `stop` |
+| `PA_STATS_FILE` | `~/.local/state/prime-worker-stats.jsonl` | Where `wait` appends one line per finished task (`prime-worker stats` prints it) |
+| `PA_H2H` | default model vs `openai-codex/gpt-6.1-terra` | The two `provider/model` pairs `prime-worker h2h` compares |
+| `PA_H2H_TIMEOUT` | `3600` | Seconds `h2h` waits for each worker |
 
 ## Safety
 

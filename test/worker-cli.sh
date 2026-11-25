@@ -9,7 +9,7 @@ mkdir -p "$PRIME_WORKERS_DIR" "$HOME/.prime/agent/sessions" "$T/bin"
 cat > "$T/bin/prime-agent" <<'STUB'
 #!/usr/bin/env bash
 case $1 in
-  -p) echo '{"id":"sid"}';;
+  -p) echo "$*" >> "$HOME/launch"; echo '{"id":"sid"}';;
   list) echo "{\"sessions\":[{\"sessionId\":\"sid\",\"activity\":\"$(cat "$HOME/activity" 2>/dev/null || echo idle)\",\"lifecycle\":\"active\"}]}";;
   send) printf '%s' "$4" > "$HOME/sent"; echo '{"deliveryStatus":"delivered"}';;
 esac
@@ -147,4 +147,23 @@ git -C "$D" commit -q -am work; touch "$D/untracked"
 out=$(PA_NUDGES=0 PA_GATE_RETRIES=2 "$W" wait d 60 "touch $T/dgate") && fail "untracked file gated"; grep -q '^?? untracked$' "$HOME/sent" || fail "untracked file not listed"
 echo untracked > "$D/.git/info/exclude"
 out=$(PA_NUDGES=0 "$W" wait d 60 "touch $T/dgate"); grep -q '^GATE PASSED' <<<"$out" && [ -e "$T/dgate" ] || fail "clean tree (ignored file only) not gated"
+# the default model (lib/common.sh) and a per-worker override both reach the launch command
+def=$(unset PA_PROVIDER PA_MODEL PA_THINKING; source "$(dirname "$W")/../lib/common.sh"; echo "--provider $PA_PROVIDER --model $PA_MODEL --thinking $PA_THINKING")
+"$W" start m1 "$T" "task" >/dev/null 2>&1; tail -1 "$HOME/launch" | grep -qF -- "$def" || fail "default model not in the launch command"
+PA_PROVIDER=px PA_MODEL=mx PA_THINKING=low "$W" start m2 "$T" "task" >/dev/null 2>&1; tail -1 "$HOME/launch" | grep -qF -- "--provider px --model mx --thinking low" || fail "model override not in the launch command"
+# stats: wait appends one line per finished task, counting only what the session file gained since the task was sent
+export PA_STATS_FILE=$T/stats.jsonl; SF=$HOME/.prime/agent/sessions/sid.jsonl
+"$W" send w "measure me" >/dev/null 2>&1
+printf '%s\n' '{"type":"compaction","usage":{"input":7,"output":1,"cost":{"total":0.25}}}' "{\"type\":\"message\",\"timestamp\":\"$(jq -nr 'now + 4 | todate')\",\"message\":{\"role\":\"assistant\",\"provider\":\"px\",\"model\":\"mx\",\"stopReason\":\"stop\",\"content\":[{\"type\":\"text\",\"text\":\"$reply\"}],\"usage\":{\"input\":10,\"output\":5,\"cacheRead\":3,\"cost\":{\"total\":0.5}}}}" >> "$SF"
+out=$(PA_NUDGES=0 "$W" wait w 60 true); [ "$(tail -1 <<<"$out")" = "WAIT: OK" ] || fail "wait with stats"
+[ "$(tail -n 1 "$PA_STATS_FILE" | jq -c '[.worker,.model,.in,.out,.cached,.cost,.turns,.compactions,.result,.gate,.fix_rounds]')" = '["w","px/mx",17,6,3,0.75,1,1,"ok","passed",0]' ] || fail "stats line: $(cat "$PA_STATS_FILE")"
+[ "$(tail -n 1 "$PA_STATS_FILE" | jq '.ttfo_s >= 2 and .ttfo_s <= 6 and .wall_s >= 0')" = true ] || fail "stats timing: $(cat "$PA_STATS_FILE")"
+n=$(wc -l < "$PA_STATS_FILE"); PA_NUDGES=0 "$W" wait w 60 >/dev/null; [ "$(wc -l < "$PA_STATS_FILE")" -eq "$n" ] || fail "second wait logged the task twice"
+out=$("$W" stats w); grep -q '^w  *px/mx .* ok  *passed' <<<"$out" || fail "stats table"
+# h2h: one brief, two models, two worktrees from the same commit, one stats row each; nothing merged
+out=$(PA_NUDGES=0 PA_H2H="pa/one pb/two" "$W" h2h "$R" "brief" true 2>&1) || fail "h2h failed"
+grep -q -- '--provider pa --model one' "$HOME/launch" && grep -q -- '--provider pb --model two' "$HOME/launch" || fail "h2h did not launch both models"
+[ "$(grep -c 'WAIT: OK' <<<"$out")" = 2 ] && [ "$(grep -c '^h2h-.*passed' <<<"$out")" = 2 ] && grep -q 'diff: no committed changes' <<<"$out" || fail "h2h report"
+[ "$(git -C "$R" worktree list | grep -c 'prime-h2h-')" = 2 ] || fail "h2h worktrees"
+out=$(PA_H2H="a/x a/x" "$W" h2h "$R" "brief" true 2>&1) && fail "h2h accepted the same model twice"
 echo "worker-cli self-check: PASS"

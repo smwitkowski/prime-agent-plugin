@@ -1,4 +1,7 @@
-# Shared by skills/*/: output contract + tripwire for silent failures. Source, don't execute.
+# Shared by skills/*/: default model, output contract + tripwire for silent failures. Source, don't execute.
+
+# The one place the default model lives. Override per run or per worker with PA_PROVIDER / PA_MODEL / PA_THINKING.
+PA_PROVIDER=${PA_PROVIDER:-openai-codex} PA_MODEL=${PA_MODEL:-gpt-6.1-terra} PA_THINKING=${PA_THINKING:-high}
 
 # Appended to every task so replies come back compact and checkable. PA_RAW=1 skips it.
 CONTRACT='

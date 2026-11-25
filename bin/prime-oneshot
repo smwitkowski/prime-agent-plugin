@@ -2,13 +2,13 @@
 # One-shot prime-agent run: prints session id, final answer and token usage, then stops the session.
 # Usage: prime-oneshot <cwd> "<task>"            new session
 #        prime-oneshot <cwd> "<task>" <id>       follow-up in an existing session (--resume)
-# Env:   PA_PROVIDER (default openai-codex), PA_MODEL (default gpt-6.1-terra), PA_THINKING (default high), PA_RAW=1 (no output contract)
+# Env:   PA_PROVIDER / PA_MODEL / PA_THINKING (defaults in lib/common.sh), PA_RAW=1 (no output contract)
 # Exit:  0 ok · 1 failed (error, abnormal stop, or empty reply) — check the FAILED line.
 set -euo pipefail
 source "$(dirname "$0")/../lib/common.sh"
 cwd=$(cd "$1" && pwd) task=$2 resume=${3:-}
 out=$(mktemp "${TMPDIR:-/tmp}/prime-oneshot.XXXXXX").jsonl
-args=(-p --mode json --provider "${PA_PROVIDER:-openai-codex}" --model "${PA_MODEL:-gpt-6.1-terra}" --thinking "${PA_THINKING:-high}" --cwd "$cwd")
+args=(-p --mode json --provider "$PA_PROVIDER" --model "$PA_MODEL" --thinking "$PA_THINKING" --cwd "$cwd")
 [ -n "$resume" ] && args+=(--resume "$resume")
 
 # A -p run ends the moment the agent waits on anything async (background command, RLM subagent). LEARNINGS 2026-10-04.
